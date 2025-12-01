@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,7 +29,8 @@ fun HomeScreen(
     viewModel: ProductViewModel,
     cartViewModel: CartViewModel,
     onProductClick: (Int) -> Unit,
-    onCartClick: () -> Unit
+    onCartClick: () -> Unit,
+    onProductManagerClick: () -> Unit  // NUEVO PARÁMETRO
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -38,9 +40,17 @@ fun HomeScreen(
             TopAppBar(
                 title = { Text("Mil Sabores") },
                 actions = {
+                    // Botón existente para carrito
                     IconButton(onClick = onCartClick) {
                         Icon(Icons.Default.ShoppingCart, contentDescription = "Ver carrito")
                     }
+
+                    // NUEVO BOTÓN: Gestor de Productos
+                    IconButton(onClick = onProductManagerClick) {
+                        Icon(Icons.Default.Storage, contentDescription = "Gestor de Productos")
+                    }
+
+                    // Botón existente para actualizar
                     IconButton(onClick = { viewModel.loadProducts(forceUpdate = true) }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Actualizar productos")
                     }

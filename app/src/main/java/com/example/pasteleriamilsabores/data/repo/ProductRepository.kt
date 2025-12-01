@@ -1,26 +1,31 @@
 package com.example.pasteleriamilsabores.data.repo
 
 import android.content.Context
+import com.example.pasteleriamilsabores.data.api.RetrofitClient
 import com.example.pasteleriamilsabores.data.local.AppDatabase
+import com.example.pasteleriamilsabores.data.local.entity.ApiProductEntity
 import com.example.pasteleriamilsabores.data.local.entity.ProductEntity
+import com.example.pasteleriamilsabores.data.model.ApiProduct
 import com.example.pasteleriamilsabores.data.model.Product
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import com.example.pasteleriamilsabores.utils.NetworkHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
-
 
 class ProductRepository(private val context: Context) {
 
     private val db = AppDatabase.getInstance(context)
-    private var dao = db.productDao()
-    private val gson = Gson()
+    private val productDao = db.productDao()
+    private val apiProductDao = db.apiProductDao()
+    private val networkHelper = NetworkHelper(context)
+    private val apiService = RetrofitClient.productApiService
 
-    //Super flujo de la UI
+    // ========== PARA PRODUCTOS DE PASTELERÍA (EXISTENTE) ==========
+
     fun getProductsFlow(): Flow<List<Product>> {
-        return dao.getAllFlow().map { list ->
+        return productDao.getAllFlow().map { list ->
             list.map { entity ->
                 Product(
                     id = entity.id,
@@ -31,14 +36,13 @@ class ProductRepository(private val context: Context) {
                     forma = entity.forma,
                     tamanio = entity.tamanio,
                     stock = entity.stock
-
                 )
             }
         }
-
     }
-    suspend fun getProductById(id: Int): Product? = withContext(Dispatchers.IO){
-        dao.getByid(id)?.let { entity ->
+
+    suspend fun getProductById(id: Int): Product? = withContext(Dispatchers.IO) {
+        productDao.getByid(id)?.let { entity ->
             Product(
                 id = entity.id,
                 titulo = entity.titulo,
@@ -52,65 +56,95 @@ class ProductRepository(private val context: Context) {
         }
     }
 
-    private suspend fun insertEntities(list: List<ProductEntity>) = withContext(Dispatchers.IO){
-        dao.insertAll(list)
-    }
+    // ========== PARA PRODUCTOS DE LA API (NUEVO) ==========
 
-    sealed class Error : Exception() {
-        data class DatabaseError(override val message: String) : Error()
-        data class JsonParseError(override val cause: Throwable) : Error()
-        data class AssetLoadError(override val cause: Throwable) : Error()
-    }
-
-    suspend fun initializeIfNeeded(forceUpdate: Boolean = false) = withContext(Dispatchers.IO) {
-        try {
-            if (forceUpdate) {
-                try {
-                    AppDatabase.recreateDatabase(context)
-                    val newDb = AppDatabase.getInstance(context)
-                    dao = newDb.productDao()
-                } catch (e: Exception) {
-                    throw Error.DatabaseError("Error al recrear la base de datos: ${e.message}")
+    suspend fun loadProductsFromApi(): Result<List<ApiProduct>> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            if (!networkHelper.isNetworkAvailable()) {
+                Result.failure(Exception("Sin conexión a Internet"))
+            } else {
+                val response = apiService.getProducts()
+                if (response.isSuccessful) {
+                    val products = response.body() ?: emptyList()
+                    Result.success(products)
+                } else {
+                    Result.failure(Exception("Error del servidor: ${response.code()}"))
                 }
             }
-
-            val c = dao.count()
-            if(c == 0 || forceUpdate) {
-                val json = try {
-                    context.assets.open("products.json").bufferedReader().use { it.readText() }
-                } catch (exception: Exception) {
-                    throw Error.AssetLoadError(exception)
-                }
-
-                val products: List<Product> = try {
-                    gson.fromJson(json, object : TypeToken<List<Product>>() {}.type)
-                } catch (exception: Exception) {
-                    throw Error.JsonParseError(exception)
-                }
-
-                val entities = products.map { p ->
-                    ProductEntity(
-                        id = p.id,
-                        titulo = p.titulo,
-                        descripcion = p.descripcion,
-                        precio = p.precio,
-                        imagen = p.imagen,
-                        forma = p.forma,
-                        tamanio = p.tamanio,
-                        stock = p.stock
-                    )
-                }
-
-                try {
-                    insertEntities(entities)
-                } catch (exception: Exception) {
-                    throw Error.DatabaseError("Error al insertar productos en la base de datos: ${exception.message}")
-                }
-            }
-        } catch (error: Error) {
-            throw error
-        } catch (exception: Exception) {
-            throw Error.DatabaseError("Error inesperado: ${exception.message}")
+        } catch (e: Exception) {
+            Result.failure(Exception("Error al cargar productos: ${e.message}"))
         }
+    }
+
+    suspend fun saveApiProductsToDatabase(apiProducts: List<ApiProduct>): Result<Boolean> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val entities = apiProducts.map { apiProduct ->
+                ApiProductEntity(
+                    sku = apiProduct.sku,
+                    nombre = apiProduct.nombre,
+                    categoria = apiProduct.categoria,
+                    descripcion = apiProduct.descripcion,
+                    precio = apiProduct.precio,
+                    imagen = apiProduct.imagen,
+                    stockConcepcion = apiProduct.getStock("Concepción"),
+                    stockTalcahuano = apiProduct.getStock("Talcahuano"),
+                    stockChillan = apiProduct.getStock("Chillán"),
+                    stockLosAngeles = apiProduct.getStock("Los Ángeles")
+                )
+            }
+            apiProductDao.insertAll(entities)
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(Exception("Error al guardar productos: ${e.message}"))
+        }
+    }
+
+    suspend fun getApiProductsFromDatabase(): Result<List<ApiProduct>> = withContext(Dispatchers.IO) {
+        return@withContext try {
+
+            val productEntities = apiProductDao.getAllFlow().first()
+
+            val apiProducts = productEntities.map { entity ->
+                ApiProduct(
+                    sku = entity.sku,
+                    nombre = entity.nombre,
+                    categoria = entity.categoria,
+                    descripcion = entity.descripcion,
+                    precio = entity.precio,
+                    imagen = entity.imagen,
+                    stockPorSucursal = mapOf(
+                        "Concepción" to entity.stockConcepcion,
+                        "Talcahuano" to entity.stockTalcahuano,
+                        "Chillán" to entity.stockChillan,
+                        "Los Ángeles" to entity.stockLosAngeles
+                    )
+                )
+            }
+            Result.success(apiProducts)
+        } catch (e: Exception) {
+            Result.failure(Exception("Error al cargar productos locales: ${e.message}"))
+        }
+    }
+
+    suspend fun hasApiProductsInDatabase(): Boolean = withContext(Dispatchers.IO) {
+        return@withContext apiProductDao.count() > 0
+    }
+
+    suspend fun clearApiProducts(): Result<Boolean> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            apiProductDao.clearAll()
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(Exception("Error al limpiar productos: ${e.message}"))
+        }
+    }
+
+    fun isOnline(): Boolean {
+        return networkHelper.isNetworkAvailable()
+    }
+
+   //para pasteleria
+    suspend fun initializeIfNeeded(forceUpdate: Boolean = false) {
+
     }
 }
