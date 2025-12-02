@@ -1,110 +1,105 @@
 package com.example.pasteleriamilsabores.viewmodel
 
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.pasteleriamilsabores.data.model.Product
 import com.example.pasteleriamilsabores.data.repo.ProductRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collectLatest
 
 sealed class UiState {
-    object Loading: UiState()
-    data class Success(
-        val products: List<Product>,
-        val searchQuery: String = "",
-        val filteredProducts: List<Product> = products
-    ): UiState()
-    sealed class Error: UiState() {
-        data class DatabaseError(val message: String): Error()
-        data class AssetError(val message: String): Error()
-        data class JsonError(val message: String): Error()
-        data class UnknownError(val message: String): Error()
+    object Loading : UiState()
+    data class Success(val filteredProducts: List<com.example.pasteleriamilsabores.data.model.Product>) : UiState()
+    sealed class Error : UiState() {
+        data class DatabaseError(val message: String) : Error()
+        data class AssetError(val message: String) : Error()
+        data class JsonError(val message: String) : Error()
+        data class UnknownError(val message: String) : Error()
     }
 }
 
-class ProductViewModel(private val repository: ProductRepository) : ViewModel() {
+class ProductViewModel(
+    private val productRepository: ProductRepository
+) : ViewModel() {
+
     private val _uiState = MutableStateFlow<UiState>(UiState.Loading)
-    val uiState: StateFlow<UiState> = _uiState
+    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val allProducts = mutableListOf<com.example.pasteleriamilsabores.data.model.Product>()
 
     init {
         loadProducts()
-        viewModelScope.launch {
-            _searchQuery.collect { query ->
-                updateFilteredProducts(query)
-            }
-        }
     }
 
-    private fun updateFilteredProducts(query: String) {
-        val currentState = _uiState.value
-        if (currentState is UiState.Success) {
-            _uiState.value = currentState.copy(
-                searchQuery = query,
-                filteredProducts = if (query.isBlank()) {
-                    currentState.products
-                } else {
-                    currentState.products.filter { product ->
-                        product.titulo.contains(query, ignoreCase = true) ||
-                        product.descripcion.contains(query, ignoreCase = true)
-                    }
+    fun loadProducts(forceUpdate: Boolean = false) {
+        viewModelScope.launch {
+            _uiState.value = UiState.Loading
+            try {
+                productRepository.initializeIfNeeded(forceUpdate)
+                val productsFlow = productRepository.getProductsFlow()
+
+                productsFlow.collect { products ->
+                    allProducts.clear()
+                    allProducts.addAll(products)
+                    filterProducts()
                 }
-            )
+            } catch (e: Exception) {
+                //Manejo de errores
+                val errorMessage = when {
+                    e.message?.contains("base de datos") == true ->
+                        "Error al acceder a la base de datos"
+                    e.message?.contains("cargar") == true ->
+                        "Error al cargar los datos iniciales"
+                    e.message?.contains("JSON") == true || e.message?.contains("parse") == true ->
+                        "Error al procesar los datos"
+                    else -> e.message ?: "Error desconocido"
+                }
+
+                _uiState.value = UiState.Error.UnknownError(errorMessage)
+            }
         }
     }
 
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
+        filterProducts()
     }
 
-    fun loadProducts(forceUpdate: Boolean = false) {
-        viewModelScope.launch {
-            try {
-                _uiState.value = UiState.Loading
-                repository.initializeIfNeeded(forceUpdate)
-                repository.getProductsFlow().collectLatest { products ->
-                    _uiState.value = UiState.Success(
-                        products = products,
-                        searchQuery = _searchQuery.value,
-                        filteredProducts = if (_searchQuery.value.isBlank()) {
-                            products
-                        } else {
-                            products.filter { product ->
-                                product.titulo.contains(_searchQuery.value, ignoreCase = true) ||
-                                product.descripcion.contains(_searchQuery.value, ignoreCase = true)
-                            }
-                        }
-                    )
-                }
-            } catch (e: Exception) {
-                val error = when(e) {
-                    is ProductRepository.Error.DatabaseError ->
-                        UiState.Error.DatabaseError("Error al acceder a la base de datos")
-                    is ProductRepository.Error.AssetLoadError ->
-                        UiState.Error.AssetError("Error al cargar los datos iniciales")
-                    is ProductRepository.Error.JsonParseError ->
-                        UiState.Error.JsonError("Error al procesar los datos")
-                    else -> UiState.Error.UnknownError(e.message ?: "Error desconocido")
-                }
-                _uiState.value = error
+    private fun filterProducts() {
+        val query = _searchQuery.value
+        val filtered = if (query.isBlank()) {
+            allProducts
+        } else {
+            allProducts.filter { product ->
+                product.titulo.contains(query, ignoreCase = true) ||
+                        product.descripcion.contains(query, ignoreCase = true)
+            }
+        }
+
+        _uiState.update { currentState ->
+            when (currentState) {
+                is UiState.Success -> UiState.Success(filtered)
+                else -> UiState.Success(filtered)
             }
         }
     }
 
-    suspend fun getProductById(id: Int): Product? {
-        return repository.getProductById(id)
+    suspend fun getProductById(id: Int): com.example.pasteleriamilsabores.data.model.Product? {
+        return productRepository.getProductById(id)
     }
 
     companion object {
-        fun factory(repository: ProductRepository) = object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        fun factory(productRepository: ProductRepository): androidx.lifecycle.ViewModelProvider.Factory {
+            return object : androidx.lifecycle.ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
-                return ProductViewModel(repository) as T
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    return ProductViewModel(productRepository) as T
+                }
             }
         }
     }
